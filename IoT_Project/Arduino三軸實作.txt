@@ -1,0 +1,303 @@
+#include <HttpClient.h>
+#include <LTask.h>
+#include <LWiFi.h>
+#include <LWiFiClient.h>
+#include <LDateTime.h>
+#define per1 3
+#define WIFI_AUTH LWIFI_WPA
+#define WIFI_AP "Jane"  //Wi-Fi ID
+#define WIFI_PASSWORD "!!!!!!!!!!"    //Wi-Fi 密碼
+#define DEVICEID "DHEHr3CT" // 測試裝置ID
+#define DEVICEKEY "aFK9K3yh6PBLujss" // 測試裝置KEY
+#define SITE_URL "api.mediatek.com"
+#include <Wire.h>
+#include <ADXL345.h>
+
+
+ADXL345 adxl; 
+
+LWiFiClient c;
+double sum_z=0.0;
+int i = 0;
+char port[4]={0}; //埠號(數值)
+char connection_info[21]={0};//連線資料
+char ip[21]={0}; //IP位址            
+int portnum;
+int val = 0;
+unsigned int rtc1;
+unsigned int lrtc1;
+String tcpdata = String(DEVICEID) + "," + String(DEVICEKEY) + ",0"; //MCS裝置資料
+String upload_led; //上傳給MCS資料
+String upload_x;
+String upload_y;
+String upload_z;
+String tcpcmd_led_on = "LED_Control,1"; //MCS傳回點亮LED燈資料
+String tcpcmd_led_off = "LED_Control,0";//MCS傳回熄滅LED燈資料
+LWiFiClient c2;
+HttpClient http(c2);
+
+void setup()
+{
+  LTask.begin();
+  LWiFi.begin();
+  Serial.begin(115200);
+  adxl.powerOn();
+  //set activity/ inactivity thresholds (0-255)
+  adxl.setActivityThreshold(75); //62.5mg per increment
+  adxl.setInactivityThreshold(75); //62.5mg per increment
+  adxl.setTimeInactivity(10); // how many seconds of no activity is inactive?
+ 
+  //look of activity movement on this axes - 1 == on; 0 == off 
+  adxl.setActivityX(1);
+  adxl.setActivityY(1);
+  adxl.setActivityZ(1);
+ 
+  //look of inactivity movement on this axes - 1 == on; 0 == off
+  adxl.setInactivityX(1);
+  adxl.setInactivityY(1);
+  adxl.setInactivityZ(1);
+ 
+  //look of tap movement on this axes - 1 == on; 0 == off
+  adxl.setTapDetectionOnX(0);
+  adxl.setTapDetectionOnY(0);
+  adxl.setTapDetectionOnZ(1);
+ 
+  //set values for what is a tap, and what is a double tap (0-255)
+  adxl.setTapThreshold(50); //62.5mg per increment
+  adxl.setTapDuration(15); //625us per increment
+  adxl.setDoubleTapLatency(80); //1.25ms per increment
+  adxl.setDoubleTapWindow(200); //1.25ms per increment
+ 
+  //set values for what is considered freefall (0-255)
+  adxl.setFreeFallThreshold(7); //(5 - 9) recommended - 62.5mg per increment
+  adxl.setFreeFallDuration(45); //(20 - 70) recommended - 5ms per increment
+ 
+  //setting all interrupts to take place on int pin 1
+  //I had issues with int pin 2, was unable to reset it
+  adxl.setInterruptMapping( ADXL345_INT_SINGLE_TAP_BIT,   ADXL345_INT1_PIN );
+  adxl.setInterruptMapping( ADXL345_INT_DOUBLE_TAP_BIT,   ADXL345_INT1_PIN );
+  adxl.setInterruptMapping( ADXL345_INT_FREE_FALL_BIT,    ADXL345_INT1_PIN );
+  adxl.setInterruptMapping( ADXL345_INT_ACTIVITY_BIT,     ADXL345_INT1_PIN );
+  adxl.setInterruptMapping( ADXL345_INT_INACTIVITY_BIT,   ADXL345_INT1_PIN );
+ 
+  //register interrupt actions - 1 == on; 0 == off  
+  adxl.setInterrupt( ADXL345_INT_SINGLE_TAP_BIT, 1);
+  adxl.setInterrupt( ADXL345_INT_DOUBLE_TAP_BIT, 1);
+  adxl.setInterrupt( ADXL345_INT_FREE_FALL_BIT,  1);
+  adxl.setInterrupt( ADXL345_INT_ACTIVITY_BIT,   1);
+  adxl.setInterrupt( ADXL345_INT_INACTIVITY_BIT, 1);
+  while(!Serial) delay(1000); //除錯用，不開啟監控畫面不執行
+
+  Serial.println("Connecting to AP");
+  while (0 == LWiFi.connect(WIFI_AP, LWiFiLoginInfo(WIFI_AUTH, WIFI_PASSWORD))) //每秒連線一次
+  {
+   
+    delay(100);
+  }
+  
+  Serial.println("calling connection");
+
+  while (!c2.connect(SITE_URL, 80))//每秒連接MCS網站一次
+  {
+    Serial.println("Re-Connecting to WebSite");
+    delay(100);
+  }
+  delay(100);
+  pinMode(13, OUTPUT);
+  getconnectInfo();//取得連線資訊
+  connectTCP();//建立TCP連線
+}
+
+void getconnectInfo(){
+  //以RESTful API方式建立連線
+  c2.print("GET /mcs/v2/devices/");
+  c2.print(DEVICEID);
+  c2.println("/connections.csv HTTP/1.1");
+  c2.print("Host: ");
+  c2.println(SITE_URL);
+  c2.print("deviceKey: ");
+  c2.println(DEVICEKEY);
+  c2.println("Connection: close");
+  c2.println();
+  delay(500);
+  int err = http.skipResponseHeaders();//忽略表頭部分，只取需要的資料
+  int bodyLen = http.contentLength();//傳送資料長度
+  Serial.print("Content length is: ");
+  Serial.println(bodyLen);
+  Serial.println();
+  char c;
+  int ipcount = 0;
+  int count = 0;
+  int separater = 0;
+  while (c2)//讀取MCS傳送過來的資料：IP及PORT
+  {
+    int v = c2.read();
+    if (v != -1)
+    {
+      c = v;
+      Serial.print(c);
+      connection_info[ipcount]=c;
+      if(c==',') //逗點前為IP，逗點後為PORT
+      separater=ipcount;
+      ipcount++;    
+    }
+    else
+    {
+      Serial.println("no more content, disconnect");
+      c2.stop();
+    }
+  }
+  Serial.print("The connection info: ");
+  Serial.println(connection_info);
+  int i;
+  for(i=0;i<separater;i++) //取得IP
+  {  ip[i]=connection_info[i];
+  }
+  int j=0;
+  separater++;
+  for(i=separater;i<21 && j<5;i++) //取得PORT
+  {  port[j]=connection_info[i];
+     j++;
+  }
+  Serial.println("The TCP Socket connection instructions:");
+  Serial.print("IP: ");
+  Serial.println(ip);
+  Serial.print("Port: ");
+  Serial.println(port);
+  portnum = atoi (port);
+  Serial.println(portnum);
+} //getconnectInfo
+
+void connectTCP(){ 
+  //取得伺服器IP位址和埠號後建立TCP連線
+  c.stop(); //關閉原有連線
+  Serial.println("Connecting to TCP");
+  Serial.println(ip);
+  Serial.println(portnum);
+  while (0 == c.connect(ip, portnum))
+  {
+    Serial.println("Re-Connecting to TCP");    
+    delay(1000);
+  }  
+  Serial.println("send TCP connect");
+  c.println(tcpdata); //傳送MCS裝置資料
+  c.println();
+  Serial.println("waiting TCP response:");
+} //connectTCP
+
+void uploadstatus(){//傳送資料到MCS
+  
+  Serial.println("calling connection");
+  LWiFiClient c2;  
+  
+  while (!c2.connect(SITE_URL, 80))
+  {
+    Serial.println("Re-Connecting to WebSite");
+    delay(1000);
+  }
+  delay(100);
+
+  int x,y,z;  
+  adxl.readXYZ(&x, &y, &z); //read the accelerometer values and store them in variables  x,y,z
+  i = i + 1;
+  double xyz[3];
+  double ax,ay,az;
+  adxl.getAcceleration(xyz);
+  ax = xyz[0];
+  ay = xyz[1];
+  az = xyz[2];
+  String text = "axis_z,,";
+  String upload_z = text+String(az);
+  int z_Length = upload_z.length();
+  c2.println("POST /mcs/v2/devices/DHEHr3CT/datapoints.csv HTTP/1.1");
+c2.println("Host: api.mediatek.com");
+c2.println("deviceKey: aFK9K3yh6PBLujss");
+c2.print("Content-Length: ");
+c2.println(z_Length);
+c2.println("Content-Type: text/csv");
+c2.println();
+c2.println(upload_z);
+  String upload_data;
+  Serial.print("x = ");
+  Serial.println(ax);
+  Serial.print("y = ");
+  Serial.println(ay);
+  Serial.print("z = ");
+  Serial.println(az); 
+  String text_r = "circle,,";
+  
+  if (i>3 && az>0.45 && az<0.65){
+    sum_z = sum_z + 0.25;
+    upload_data=text_r + String(sum_z);
+    }
+  if ((az>0.0 && az<0.3) || (az<-0.0 && az>-0.3)){
+    sum_z = sum_z + 0.25;
+    upload_data=text_r + String(sum_z);
+    }
+  if (az<-0.45 && az>-0.65){
+    sum_z = sum_z + 0.25;
+    upload_data=text_r + String(sum_z);
+    }
+int dataLength = upload_data.length();  
+c2.println("POST /mcs/v2/devices/DHEHr3CT/datapoints.csv HTTP/1.1");
+c2.println("Host: api.mediatek.com");
+c2.println("deviceKey: aFK9K3yh6PBLujss");
+c2.print("Content-Length: ");
+c2.println(dataLength);
+c2.println("Content-Type: text/csv");
+c2.println("Connection: close");
+c2.println();
+c2.println(upload_data);
+delay(100);
+Serial.println("**********************");
+ 
+  int err = http.skipResponseHeaders();
+  int bodyLen = http.contentLength();
+  Serial.print("Content length is: ");
+  Serial.println(bodyLen);
+  Serial.println();
+  while (c2) //在Serial視窗顯示MCS回傳值
+  {
+    int v = c2.read();
+    if (v != -1)
+    {
+      Serial.print(char(v));
+    }
+    else
+    {
+      Serial.println("no more content, disconnect");
+      c2.stop();  
+    } 
+  }
+}
+
+
+void loop() 
+{
+  String tcpcmd=""; //存MCS傳送的資料
+  delay(500);
+  while (c.available())
+   {
+      int v = c.read();
+      if (v != -1)
+      {
+        Serial.print((char)v);
+        tcpcmd += (char)v;
+        if (tcpcmd.substring(40).equals(tcpcmd_led_on)){ //點亮LED燈
+          digitalWrite(13, HIGH);
+          Serial.println("Switch LED ON ");
+          tcpcmd="";
+        }else if(tcpcmd.substring(40).equals(tcpcmd_led_off)){  //熄滅LED燈
+          digitalWrite(13, LOW);
+          Serial.println("Switch LED OFF");
+          tcpcmd="";
+        }
+      }
+   }
+   //每一秒傳送給MCS資料一次
+  LDateTime.getRtc(&rtc1);
+  if ((rtc1 - lrtc1) >= per1) {
+    uploadstatus();
+    lrtc1 = rtc1;
+  }
+}
